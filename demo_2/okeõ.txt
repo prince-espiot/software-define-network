@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+
+function create_ns() {
+echo "Creating the namespace $1"
+ip netns add $1
+}
+
+function create_ovs_bridge() {
+echo "Creating the OVS bridge $1"
+ovs-vsctl add-br $1
+ovs-vsctl set bridge $1 protocol=OpenFlow13
+
+}
+
+
+function attach_ns_to_ovs() {
+echo "Attaching the namespace $1 to the OVS $2"
+ip link add $3 type veth peer name $4
+ip link set $3 netns $1
+ovs-vsctl add-port $2 $4 -- set Interface $4 ofport_request=$5
+ip netns exec $1 ip addr add $6/24 dev $3
+ip netns exec $1 ip link set dev $3 up
+ip link set $4 up
+}
+
+
+function attach_ovs_to_ovs() {
+echo "Attaching the OVS $1 to the OVS $2"
+ip link add name $3 type veth peer name $4
+ip link set $3 up
+ip link set $4 up
+ovs-vsctl add-port $1 $3 -- set Interface $3 ofport_request=$5
+ovs-vsctl add-port $2 $4 -- set Interface $4 ofport_request=$5
+}
+
+function attach_ovs_to_sdn() {
+echo "Attaching the OVS bridge to the ONOS controller"
+ovs-vsctl set-controller $1 tcp:127.0.0.1:6653
+}
+
+depth=3
+fanout=2
+tag=0
+for((i=0; i<=depth; i++))
+do
+    index=1
+    host=1
+    for((j=1; j<=$((fanout**$i)); j++))
+    do
+        if(($i == depth))
+        then
+            create_ns h-$host
+            attach_ns_to_ovs h-$host br-$(($i - 1)).$index veth-br-$host veth-br-ovs$host-$(($host + 1)) 2 10.0.0.$host
+            host=$(($host+1))
+        else
+            create_ovs_bridge br-$i.$j
+            attach_ovs_to_ovs br-$(($i - 1)).$index br-$i.$j br-ovs$tag br-ovs$tag-$(($tag + 1)) 1
+            attach_ovs_to_sdn br-$i.$j
+            tag=$(($tag+1))
+        fi
+        if(($j % fanout == 0))
+        then
+            index=$(($index + 1))
+        fi
+        
+    done
+done
+
+
+# Ping hosts
+hosts=$((depth**fanout))
+for((i=1, j=$(($hosts - 1)); i<$hosts; i++, j--))
+do
+    ip netns exec h-$i ping -c 1 10.0.0.$j
+done

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+# creates the host
+function create_ns() {
+echo "Creating the namespace $1"
+ip netns add $1
+}
+
+# creates the switch
+function create_ovs_bridge() {
+echo "Creating the OVS bridge $1"
+ovs-vsctl set bridge $1 protocol=OpenFlow13
+ovs-vsctl add-br $1
+
+}
+
+# attach host to switch
+function attach_ns_to_ovs() {
+echo "Attaching the namespace $1 to the OVS $2"
+ip link add $3 type veth peer name $4
+ip link set $3 netns $1
+ovs-vsctl add-port $2 $4 -- set Interface $4 ofport_request=$5
+ip netns exec $1 ip addr add $6/24 dev $3
+ip netns exec $1 ip link set dev $3 up
+ip link set $4 up
+}
+
+# attach switch to switch
+function attach_ovs_to_ovs() {
+echo "Attaching the OVS $1 to the OVS $2"
+ip link add name $3 type veth peer name $4
+ip link set $3 up
+ip link set $4 up
+ovs-vsctl add-port $1 $3 -- set Interface $3 ofport_request=$5
+ovs-vsctl add-port $2 $4 -- set Interface $4 ofport_request=$5
+}
+
+# attach switch to remote controller
+function attach_ovs_to_sdn() {
+echo "Attaching the OVS bridge to the ONOS controller"
+ovs-vsctl set-controller $1 tcp:127.0.0.1:6653
+}
+
+#create hosts
+for ((h=1; h<=$2**$1;h++))
+do
+	create_ns h$h
+done
+
+
+# create bridge
+depth=$1
+fanout=$2
+if ((depth > 0 ))
+then
+  for ((i=1; i<= depth; i++))
+  do
+	create_ovs_bridge br-$i  # create first bridge as first branch which other branches connect
+	for ((j=1; j<= fanout; j++))
+	do
+		k=$((j+1)) #create the other branches 
+		create_ovs_bridge br-$i-$j  # first branch of the first 
+		create_ovs_bridge br-$i-$k  # create the second branch of the first
+		
+	done
+  done
+fi
+
+# attach ovs to ovs
+for ((i=1; i<= depth; i++))
+do
+	j=$((2))
+	k=$((3))
+	attach_ovs_to_ovs br-$i br-$i-$j br-ovs$i br-ovs$i-$j-$j 1
+	attach_ovs_to_ovs br-$i br-$i-$k br-ovs$i br-ovs$i-$k-$k 1
+		
+done
+
+for ((f=1; f<=fanout; f++))
+do
+	k=$((f+1))
+	attach_ovs_to_ovs br-$f-$k br-$k br-ovs$f-$k br-ovs$k 1
+done
+
+
+#attach namespace to bridge
+for ((i=1; i<= depth; i++))
+do
+	if((i==depth))
+	then
+		for ((j=2; j<=fanout; j++))
+		do
+			for ((h=1; h<=$2**$1;h++))
+			do	
+				k=$((j+1))
+				n=$((h+1))
+				attach_ns_to_ovs h$h br-$i-$k veth-br-$i-$k veth-br-ovs$i-$k 2 10.0.0.$n
+		
+				m=$((h+1))
+				attach_ns_to_ovs h$m br-$i-$k veth-br-$i-$k veth-br-ovs$i-$k 2 10.0.0.$m
+				((h++))
+			done
+		done
+	fi
+done
+
+
+
+
+
+
